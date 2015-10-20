@@ -45,6 +45,8 @@ end
 ### Define variables
 require_relative 'config'
 @log_to_file = true
+max_errors = 10
+num_of_errors = 0
 
 log "Starting..."
 qs = "?verb=ListRecords&set=#{OAI_SET}&metadataPrefix=marc21"
@@ -62,31 +64,38 @@ begin
 
 	# for each record
 	document.xpath('/oai:OAI-PMH/oai:ListRecords/oai:record', oai_ns).each do |r| 
-		identifier = r.at_xpath('oai:header/oai:identifier', oai_ns).content
-		identifier = identifier[identifier.rindex(':')+1..-1]
+		begin
+			identifier = r.at_xpath('oai:header/oai:identifier', oai_ns).content
+			identifier = identifier[identifier.rindex(':')+1..-1]
 
-		log "Processing record #{identifier}"
-		# for each file
-		r.xpath('oai:metadata/marc:record/marc:datafield[@tag="856"]/marc:subfield[@code="u"]', oai_ns).each_with_index do |f,i|
-			log "Downloading #{f.content} to #{TEMP_FOLDER}/#{identifier}"
-			filename=download_file(f.content, "#{TEMP_FOLDER}/#{identifier}")
-			local_filename = "#{TEMP_FOLDER}/#{identifier}/#{filename}"
-			log "Saved #{local_filename}"
+			log "Processing record #{identifier}"
+			# for each file
+			r.xpath('oai:metadata/marc:record/marc:datafield[@tag="856"]/marc:subfield[@code="u"]', oai_ns).each_with_index do |f,i|
+				log "Downloading #{f.content} to #{TEMP_FOLDER}/#{identifier}"
+				filename=download_file(f.content, "#{TEMP_FOLDER}/#{identifier}")
+				local_filename = "#{TEMP_FOLDER}/#{identifier}/#{filename}"
+				log "Saved #{local_filename}"
 
-			remote_filename = "#{@inst}/upload/#{IMPORT_PROFILE_ID}/#{ingest_id}/#{identifier}/#{filename}"
-			log "Uploading #{remote_filename}"
-			File.open("#{local_filename}", 'rb') do |file|
-				write_file(S3_BUCKET, 
-					"#{remote_filename}", file)
+				remote_filename = "#{@inst}/upload/#{IMPORT_PROFILE_ID}/#{ingest_id}/#{identifier}/#{filename}"
+				log "Uploading #{remote_filename}"
+				File.open("#{local_filename}", 'rb') do |file|
+					write_file(S3_BUCKET, 
+						"#{remote_filename}", file)
+				end
+
+				# Update field
+				f.replace("#{identifier}/#{filename}")
+	            
+				# delete file & folder 
+				File.delete("#{local_filename}")
+				Dir.delete("#{TEMP_FOLDER}/#{identifier}")
 			end
-
-			# Update field
-			f.replace("#{identifier}/#{filename}")
-            
-			# delete file & folder 
-			File.delete("#{local_filename}")
-			Dir.delete("#{TEMP_FOLDER}/#{identifier}")
-		end
+		rescue Exception => e  
+			num_of_errors += 1
+  			log "Failed to process #{identifier}: #{e.message}.", 'ERROR'
+  			log "Exiting loop due to too many errors (#{num_of_errors}).", 'ERROR' and 
+  				break if num_of_errors > max_errors
+  		end
 	end
 
 	resumptionToken = 
