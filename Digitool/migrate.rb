@@ -9,15 +9,17 @@ def log(msg, level='INFO')
 	time = time.strftime("%Y-%m-%d %H:%M:%S")
 	str = "#{time} - #{level.ljust(5,' ')} #{msg}"
 	puts str
-	#@f ||= File.open "#{Time.new.strftime("%Y%m%d%H%M%S")}.log", "a"
-	#@f.puts str
+	if @log_to_file
+		@f ||= File.open "#{Time.new.strftime("%Y%m%d%H%M%S")}.log", "a"
+		@f.puts str
+	end
 	true
 end
 
-def write_file(bucket, key, path)
-	@s3 ||= Aws::S3::Resource.new(credentials: aws_creds(@inst), region: 'us-east-1')
+def write_file(bucket, key, content)
+	@s3 ||= Aws::S3::Resource.new(credentials: aws_creds(@inst), region: @region || 'us-east-1')
 	obj = @s3.bucket(bucket).object(key)
-	obj.upload_file(path)
+	obj.put(body: content)
 end
 
 def aws_creds(profile = 'default')
@@ -41,69 +43,66 @@ def download_file(url, folder)
 end
 
 ### Define variables
-### <<<<<<<<<<<<<<<<
-s3_bucket = 'na-st01.ext.exlibrisgroup.com' # bucket name
-@inst = 'TR_INTEGRATION_INST' # institution name
-import_profile_id = '123456789' # ID of the import profile in ALma
-digitool_oai_base = 'http://dc03vg0053eu.hosted.exlibrisgroup.com:8881/OAI-PUB' # URL of OAI in digitool
-oai_set = 'foralma' 
-temp_folder = '/home/opherk/tmp/'
-marc_file = "#{temp_folder}marc.xml"
-### <<<<<<<<<<<<<<<<
+require_relative 'config'
+@log_to_file = true
 
 log "Starting..."
-File.write("#{marc_file}", "<collection>", mode: 'w+')
-qs = "?verb=ListRecords&set=#{oai_set}&metadataPrefix=marc21"
+qs = "?verb=ListRecords&set=#{OAI_SET}&metadataPrefix=marc21"
 oai_ns = {'oai' => 'http://www.openarchives.org/OAI/2.0/', 'marc' => 'http://www.loc.gov/MARC21/slim'}
 
 ingest_id = SecureRandom.uuid
 
 begin 
 	log "Calling OAI with query string #{qs}"
-	oai = RestClient.get digitool_oai_base + qs
+	oai = RestClient.get DIGITOOL_OAI_BASE + qs
 
 	document = Nokogiri::XML(oai)
-
 	recordCount = document.xpath('/oai:OAI-PMH/oai:ListRecords/oai:record', oai_ns).count
 	log "#{recordCount} records retrieved"
 
 	# for each record
-	document.xpath('/oai:OAI-PMH/oai:ListRecords/oai:record', oai_ns)[0,2].each do |r| 
+	document.xpath('/oai:OAI-PMH/oai:ListRecords/oai:record', oai_ns).each do |r| 
 		identifier = r.at_xpath('oai:header/oai:identifier', oai_ns).content
 		identifier = identifier[identifier.rindex(':')+1..-1]
 
 		log "Processing record #{identifier}"
 		# for each file
 		r.xpath('oai:metadata/marc:record/marc:datafield[@tag="856"]/marc:subfield[@code="u"]', oai_ns).each_with_index do |f,i|
-			log "Downloading #{f.content}"
-			filename=download_file(f.content, "#{temp_folder}/#{identifier}")
-			#filename="A study on the adoption and diffusion of information and communication technologies in the banking industry in Thailand using multiple-criteria decision making and system dynamics approaches..pdf"
-			log "Saved #{temp_folder}#{identifier}/#{filename}"
+			log "Downloading #{f.content} to #{TEMP_FOLDER}/#{identifier}"
+			filename=download_file(f.content, "#{TEMP_FOLDER}/#{identifier}")
+			local_filename = "#{TEMP_FOLDER}/#{identifier}/#{filename}"
+			log "Saved #{local_filename}"
 
-			log "Uploading to S3"
-			write_file(s3_bucket, "#{@inst}/upload/#{import_profile_id}/#{ingest_id}/#{identifier}/#{filename}", "#{temp_folder}#{identifier}/#{filename}")
+			remote_filename = "#{@inst}/upload/#{IMPORT_PROFILE_ID}/#{ingest_id}/#{identifier}/#{filename}"
+			log "Uploading #{remote_filename}"
+			File.open("#{local_filename}", 'rb') do |file|
+				write_file(S3_BUCKET, 
+					"#{remote_filename}", file)
+			end
 
 			# Update field
 			f.replace("#{identifier}/#{filename}")
             
-			# TODO: delete file & folder (if empty)
-			#log "Uploaded. Removed file from temp location."
-
+			# delete file & folder 
+			File.delete("#{local_filename}")
+			Dir.delete("#{TEMP_FOLDER}/#{identifier}")
 		end
-        File.write("#{marc_file}", "#{r.xpath('oai:metadata/marc:record', oai_ns)}", mode: 'a')
 	end
 
-    File.write("#{marc_file}", "</collection>", mode: 'a')
-    
 	resumptionToken = 
 		document.xpath('/oai:OAI-PMH/oai:ListRecords/oai:resumptionToken', {'oai' => 'http://www.openarchives.org/OAI/2.0/'}).text	
 	qs = '?verb=ListRecords&resumptionToken=' + resumptionToken
     
-    File.rename("#{marc_file}", "#{resumptionToken}#{marc_file}")
 	# Write marcxml file to ingest location
-    log "Uploading #{resumptionToken}#{marc_file} to S3 - uuid=#{ingest_id}"
-    write_file(s3_bucket, "#{@inst}/upload/#{import_profile_id}/#{ingest_id}/marc.xml", "#{marc_file}")
-    
+	remote_marc_filename = "#{@inst}/upload/#{IMPORT_PROFILE_ID}/#{ingest_id}/#{resumptionToken}-marc.xml"
+    log "Uploading #{remote_marc_filename}"
+    marc_document = Nokogiri::XML("<collection></collection")
+	marc_document.at_css("collection").
+		add_child(document.xpath('/oai:OAI-PMH/oai:ListRecords/oai:record/oai:metadata/marc:record', oai_ns))
+    write_file S3_BUCKET, 
+    	"#{remote_marc_filename}", 
+    	marc_document.to_s
+    	
 end until resumptionToken == ''
 
 log "Complete"
