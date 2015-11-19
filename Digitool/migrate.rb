@@ -33,6 +33,7 @@ end
 def download_file(url, folder)
 	filename = RestClient.head(url).headers[:content_disposition]
 	filename = filename[filename.index('filename=')+9..-1] if filename
+	# filename may require more fine-tuning
 	filename ||= SecureRandom.uuid
 	folder = "#{folder}"
 	FileUtils.mkdir_p folder
@@ -84,7 +85,7 @@ begin
 				end
 
 				# Update field
-				f.replace("#{identifier}/#{filename}")
+				f.content="#{identifier}/#{filename}"
 	            
 				# delete file & folder 
 				File.delete("#{local_filename}")
